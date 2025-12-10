@@ -3,6 +3,64 @@
 
 An enhanced Python-based Model Context Protocol (MCP) server for interacting with Proxmox virtualization platforms. This project is built upon **[canvrno/ProxmoxMCP](https://github.com/canvrno/ProxmoxMCP)** with numerous new features and improvements, providing complete OpenAPI integration and more powerful virtualization management capabilities.
 
+Phase-specific note
+-------------------
+During the current design/prototype phase, agents and contributors should update `build-plan.md`, `AGENTS.md`, `README.md`, and `CHANGELOG.md` when they make changes that affect architecture, behaviour, or operations. This ensures traceability and helps reviewers verify the changes.
+
+Phase gating & reporting
+------------------------
+- Phase 1 (Compose prototype) is complete; archive each run's `agent-prototype/artifacts/proof.json` under `artifacts/phase-1/`.
+- Phase 2 (Proxmox-native deployment) remains active until the PostgreSQL socket/AppArmor fix is validated per `INTEGRATION_TEST_PLAN.md` and the evidence bundle resides in `artifacts/phase-2/`.
+- Phase 3 (adapter-backed automations) stays blocked until the first two phases have signed validation reports. Report status only when a phase closes and always link to the stored artifacts.
+
+PostgreSQL socket remediation
+-----------------------------
+- LXC-first plan: run `pct set <ctid> --features nesting=1,keyctl=1,fuse=1`, adjust the container's AppArmor profile as documented in `build-plan.md`, and confirm `/var/run/postgresql/.s.PGSQL.*` exists. Capture `journalctl -u postgresql` output and attach it to `artifacts/postgres-mitigation/`.
+- Escalation path: if LXC tuning fails, deploy a dedicated Postgres VM or leverage the Proxmox VE Helper-Scripts catalog (`https://community-scripts.github.io/ProxmoxVE/`) to provision both Postgres and Adminer appliances. Run those scripts through `http://192.168.12.252:3000` so the orchestrator logs every action.
+- Validation: update `agent-prototype/artifacts/proof.json` with adapter health metadata and add socket-listing commands (`ss -lnpt | grep 5432`, `ls -l /var/run/postgresql`) before approving the phase transition.
+
+Existing services on `cult-of-joey`
+-----------------------------------
+Reference the running LXCs before deploying additional automation:
+
+| CT ID | Name           | Role                  |
+|-------|----------------|-----------------------|
+| 100   | cloudflare-ddns| Cloudflare DNS updater|
+| 101   | traefik        | Reverse proxy ingress |
+| 102   | docker         | Legacy Docker runner  |
+| 103   | infisical      | Secret manager        |
+| 104   | zoraxy         | Dashboard proxy       |
+| 105   | cosmos         | Homelab orchestrator  |
+| 106   | grafana        | Metrics UI            |
+| 107   | wikijs         | Documentation wiki    |
+| 108   | semaphore      | CI/playbook runner    |
+| 109   | paperless-ngx  | Document archive      |
+| 110   | onedev         | Git/CI server         |
+| 111   | bytestash      | File/object store     |
+| 112   | cockpit        | Server console        |
+| 113   | forgejo        | Git forge             |
+
+Storage: `local`, `local-lvm`, `backup-drive`, `vm-data`, and `localnetwork` already exist on the node. Extend these instead of creating duplicates unless a change request documents the need.
+
+Network & DNS cookbook:
+
+| Segment | Bridge | CIDR | Hosts / Notes |
+|---------|--------|------|---------------|
+| Management LAN | `vmbr0` | `192.168.12.0/24` | Proxmox UI `192.168.12.2`, helper proxy `192.168.12.252`. |
+| Service LAN | `vmbr1` (planned) | `192.168.50.0/24` | LXC workloads (Temporal/Postgres/etc.). |
+| Storage VLAN | `vmbr2` (TBD) | – | Reserved for NFS/iSCSI (fill in once wired). |
+
+DNS entries:
+- `traefik.cult-of-joey.lab` → CT 101 (Traefik)
+- `forgejo.cult-of-joey.lab` → CT 113 (Git/docs master)
+- `grafana.cult-of-joey.lab` → CT 106
+- `api.cult-of-joey.lab` → helper proxy at `192.168.12.252`
+- `vault.cult-of-joey.lab` → reserved for future Vault CT/VM
+
+Forgejo workflow:
+- Treat Forgejo as the authoritative repo host. Add it as a remote (`ssh://git@forgejo.cult-of-joey.lab:2222/cult-of-joey/proxmox-master.git`) and mirror all documentation/code there.
+- Manage issues, Projects, and Actions (CI) inside Forgejo so operators can plan/track phase work; reference Forgejo issue IDs in local commits where possible.
+
 ## Acknowledgments
 
 This project is built upon the excellent open-source project [ProxmoxMCP](https://github.com/canvrno/ProxmoxMCP) by [@canvrno](https://github.com/canvrno). Thanks to the original author for providing the foundational framework and creative inspiration!
@@ -116,21 +174,24 @@ Before starting, ensure you have:
        "proxmox": {
            "host": "PROXMOX_HOST",        # Required: Your Proxmox server address
            "port": 8006,                  # Optional: Default is 8006
-           "verify_ssl": false,           # Optional: Set false for self-signed certs
+           "verify_ssl": true,            # Recommended: Install your cluster CA instead of disabling TLS
            "service": "PVE"               # Optional: Default is PVE
        },
        "auth": {
-           "user": "USER@pve",            # Required: Your Proxmox username
-           "token_name": "TOKEN_NAME",    # Required: API token ID
-           "token_value": "TOKEN_VALUE"   # Required: API token value
+           "user": "automation@pve",      # Recommended: Dedicated automation account
+           "token_name": "TOKEN_NAME",    # API token ID scoped to the automation account
+           "token_env_var": "PROXMOX_TOKEN_VALUE"  # Token pulled securely from env at runtime
        },
        "logging": {
-           "level": "INFO",               # Optional: DEBUG for more detail
+           "level": "DEBUG",              # Keep consistent verbosity across environments
            "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
            "file": "proxmox_mcp.log"      # Optional: Log to file
        }
    }
    ```
+
+   > 💡 **Security Tip:** `token_value` remains supported for air-gapped testing, but leaving it unset and exporting
+   > `PROXMOX_TOKEN_VALUE` (or any custom `token_env_var`) keeps secrets out of the repository and audit trails cleaner.
 
 ### Verifying Installation
 
@@ -153,7 +214,67 @@ Before starting, ensure you have:
    $env:PROXMOX_MCP_CONFIG="proxmox-config\config.json"; python -m proxmox_mcp.server
    ```
 
+### Agent Helper (Proxmoxer CLI)
+
+Automation agents can use the lightweight helper in `scripts/proxmoxer_agent.py` to run quick health checks via Proxmoxer without spinning up the full MCP server:
+
+```bash
+cd ProxmoxMCP-Plus
+source .venv/bin/activate
+# Show API version
+python scripts/proxmoxer_agent.py --api http://192.168.12.252:3000 version
+# List nodes or VMs
+python scripts/proxmoxer_agent.py --api http://192.168.12.252:3000 nodes
+python scripts/proxmoxer_agent.py --api http://192.168.12.252:3000 vms --node pve
+```
+
+The script reads the existing MCP config (or `PROXMOX_MCP_CONFIG`) and supports token-less configs by fetching the token from the configured environment variable, making it safe for reuse in agent workflows.
+
+### Proxmoxia Adapter (Dynamic API)
+
+For agents that prefer the dynamic attribute interface from [baseblack/Proxmoxia](https://github.com/baseblack/Proxmoxia), the project ships a Python 3 compatible adapter in `src/proxmox_mcp/vendor/proxmoxia/` plus a helper CLI:
+
+```bash
+cd ProxmoxMCP-Plus
+source .venv/bin/activate
+python scripts/proxmoxia_agent.py --api http://192.168.12.252:3000 version
+python scripts/proxmoxia_agent.py --api http://192.168.12.252:3000 nodes
+python scripts/proxmoxia_agent.py --api http://192.168.12.252:3000 vms --node pve
+```
+
+The adapter talks to the Proxmox API using API tokens (no passwords needed) and keeps the original attribute semantics, so agents can reuse existing Proxmoxia-style snippets in Python automation.
+
+### Agent Adapter (Shared Client)
+
+Temporal workers and other automation agents can now import `proxmox_mcp.agent.ProxmoxAgentAdapter` to reuse MCP configuration loading, run read-only `health_check`/`list_nodes`/`list_vms` queries, and build `AdapterActionPlan` objects before triggering destructive workflows. Execution is intentionally stubbed until manual-approval queues are wired up, so plans act as auditable intent records.
+
+```bash
+cd ProxmoxMCP-Plus
+source .venv/bin/activate
+python - <<'PY'
+from proxmox_mcp.agent import ProxmoxAgentAdapter
+
+adapter = ProxmoxAgentAdapter(auto_connect=False)
+print(adapter.health_check())
+plan = adapter.plan_vm_creation(node="pve", vm_id=123, name="demo", cpu=2, memory_mb=2048, disk_gb=32)
+print(plan)
+PY
+```
+
+Set `PROXMOX_MCP_CONFIG` (or copy `proxmox-config/config.example.json` to `proxmox-config/config.json`) before running the snippet so the adapter can load a valid configuration.
+
+### Operational context
+- The adapter + MCP tooling expect canonical VM/CT definitions to live under `/etc/pve/qemu-server/<vmid>.conf` and `/etc/pve/lxc/<vmid>.conf`. Avoid manual edits outside MCP workflows to keep drift low.
+- When calling tools, always include storage (local-lvm, ZFS, Ceph, etc.) and bridge (e.g., `vmbr0`, `vmbr1`) parameters so automation can validate the target backend supports snapshots/migrations.
+- Post-workflow hooks should register `vzdump` backups and log the outcome of restore drills as part of the evidence payload for auditors.
+- Temporal/Postgres prototypes should use Proxmox-native resources first (see `agent-prototype/LXC_DEPLOYMENT.md`). Keep Docker Compose as a workstation fallback only and document each exception.
+
 ## Configuration
+
+### Secure Authentication Defaults
+- Create a limited-scope automation account such as `mcp-automation@pve` and grant only the roles your workflows require.
+- Store the token secret in an environment variable (default: `PROXMOX_TOKEN_VALUE`) instead of committing `token_value` to disk. When `token_value` is omitted, the server will automatically load it from the configured `token_env_var`.
+- Keep `verify_ssl` set to `true` wherever possible and install the Proxmox cluster CA on hosts running the MCP server to avoid MITM exposure.
 
 ### Proxmox API Token Setup
 1. Log into your Proxmox web interface
@@ -227,7 +348,7 @@ For Cline users, add this configuration to your MCP settings file (typically at 
                 "PROXMOX_TOKEN_NAME": "token-name",
                 "PROXMOX_TOKEN_VALUE": "token-value",
                 "PROXMOX_PORT": "8006",
-                "PROXMOX_VERIFY_SSL": "false",
+                "PROXMOX_VERIFY_SSL": "true",
                 "PROXMOX_SERVICE": "PVE",
                 "LOG_LEVEL": "DEBUG"
             },

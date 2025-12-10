@@ -13,6 +13,7 @@ The models provide:
 - Field descriptions
 - Required vs optional field handling
 """
+import os
 from typing import Optional, Annotated
 from pydantic import BaseModel, Field
 
@@ -55,7 +56,26 @@ class AuthConfig(BaseModel):
     """
     user: str  # Required: Username (e.g., 'root@pam')
     token_name: str  # Required: API token name
-    token_value: str  # Required: API token secret
+    token_value: Optional[str] = None  # Optional: API token secret (prefer env var)
+    token_env_var: Optional[str] = Field(
+        default="PROXMOX_TOKEN_VALUE",
+        description="Environment variable to read token value from when omitted"
+    )
+
+    def resolve_token_value(self) -> str:
+        """Return the token value, preferring secure environment variables."""
+        if self.token_value:
+            return self.token_value
+
+        if self.token_env_var:
+            env_value = os.getenv(self.token_env_var)
+            if env_value:
+                return env_value
+
+        raise ValueError(
+            "Proxmox API token value is not set. Supply 'token_value' or set the "
+            f"environment variable '{self.token_env_var or 'PROXMOX_TOKEN_VALUE'}'."
+        )
 
 class LoggingConfig(BaseModel):
     """Model for logging configuration.

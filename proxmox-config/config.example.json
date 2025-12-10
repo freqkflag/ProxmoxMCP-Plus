@@ -2,13 +2,13 @@
     "proxmox": {
         "host": "your-proxmox-host-ip",
         "port": 8006,
-        "verify_ssl": false,
+        "verify_ssl": true,
         "service": "PVE"
     },
     "auth": {
-        "user": "username@pve",
+        "user": "automation@pve",
         "token_name": "your-token-name",
-        "token_value": "your-token-value"
+        "token_env_var": "PROXMOX_TOKEN_VALUE"
     },
     "logging": {
         "level": "DEBUG",

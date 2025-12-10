@@ -57,12 +57,14 @@ class ProxmoxManager:
         Returns:
             Dictionary containing merged configuration ready for API initialization
         """
+        token_value = auth_config.resolve_token_value()
+
         return {
             'host': proxmox_config.host,
             'port': proxmox_config.port,
             'user': auth_config.user,
             'token_name': auth_config.token_name,
-            'token_value': auth_config.token_value,
+            'token_value': token_value,
             'verify_ssl': proxmox_config.verify_ssl,
             'service': proxmox_config.service
         }
