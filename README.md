@@ -60,6 +60,7 @@ DNS entries:
 Forgejo workflow:
 - Treat Forgejo as the authoritative repo host. Add it as a remote (`ssh://git@forgejo.cult-of-joey.lab:2222/cult-of-joey/proxmox-master.git`) and mirror all documentation/code there.
 - Manage issues, Projects, and Actions (CI) inside Forgejo so operators can plan/track phase work; reference Forgejo issue IDs in local commits where possible.
+- For the end-to-end migration checklist (repo topology, submodules, Actions), follow `FORGEJO_MIGRATION_PLAN.md`.
 
 ## Acknowledgments
 
